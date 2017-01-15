@@ -19,15 +19,14 @@ namespace TaviHelper
         public const int Port = 6667;
         public static BotInfo botinfo = new BotInfo()
         {
-            Nickname = "LastRobot",
-            Password = ""
+            Nickname = "",
+            Password = "",
+            Channel = ""
         };
 
-        public const string Channel = "#tavinnea";
+        public static string g_channel = "";
         private static IrcClient ircClient = new IrcClient();
-        public static Queue<byte[]> _speakQueue = new Queue<byte[]>();
         private static SpeakTaskManager _speakTaskManager;
-        public static int g_DeviceNumber = 0;
 
         static void Main(string[] args)
         {
@@ -43,6 +42,17 @@ namespace TaviHelper
                 botinfo = JsonConvert.DeserializeObject<BotInfo>(botinfostring);
             }
 
+            if(!string.IsNullOrEmpty(botinfo.Channel))
+            {
+                if (botinfo.Channel.StartsWith("#"))
+                {
+                    g_channel = botinfo.Channel.ToLower();
+                }else
+                {
+                    g_channel = $"#{botinfo.Channel.ToLower()}";
+                }
+            }
+
             var waveOutCount = WaveOut.DeviceCount;
             Console.WriteLine($"There are {waveOutCount} devices");
             for (var i = 0; i < waveOutCount; i++)
@@ -51,9 +61,9 @@ namespace TaviHelper
             }
             Console.WriteLine();
             Console.WriteLine("Select device output: ");
-            var device = Console.ReadLine();
+            var device = Convert.ToInt32(Console.ReadLine());
 
-            _speakTaskManager = new SpeakTaskManager(_speakQueue, g_DeviceNumber);
+            _speakTaskManager = new SpeakTaskManager(device);
             _speakTaskManager.Start();
 
             ircClient.OnConnected += IrcClient_OnConnected;
@@ -66,12 +76,12 @@ namespace TaviHelper
 
         private static void IrcClient_OnChannelMessage(object sender, IrcEventArgs e)
         {
-            if (e.Data.Channel == Channel)
+            if (e.Data.Channel == g_channel)
             {
                 if (e.Data.Nick != "tavinnea" && e.Data.Nick != botinfo.Nickname.ToLower())
                 {
                     var data = Say($"{e.Data.Nick} said {e.Data.Message}");
-                    _speakQueue.Enqueue(data);
+                    _speakTaskManager.QueuePlayback(data);
                 }
             }
         }
@@ -80,7 +90,7 @@ namespace TaviHelper
         {
             ircClient.Login(botinfo.Nickname, botinfo.Nickname, 0, "", botinfo.Password);
             ircClient.WriteLine("CAP REQ :twitch.tv/membership");
-            ircClient.RfcJoin(Channel);
+            ircClient.RfcJoin(g_channel);
             ircClient.Listen();
         }
 
@@ -132,14 +142,17 @@ namespace TaviHelper
         {
             private CancellationTokenSource _cancelSource = new CancellationTokenSource();
             private int _playbackDevice = 0;
+            private Queue<byte[]> _playbackQueue = new Queue<byte[]>();
+            private AutoResetEvent _newPlayback = new AutoResetEvent(false);
 
-            public SpeakTaskManager(Queue<byte[]> speakQueue, int playbackDevice)
+            public SpeakTaskManager(int playbackDevice)
             {
                 _playbackDevice = playbackDevice;
             }
 
             public void Start()
             {
+                Console.WriteLine("Starting Speak Task");
                 var cancelToken = _cancelSource.Token;
                 Task.Factory.StartNew(() => speakPump(cancelToken), cancelToken);
             }
@@ -149,15 +162,24 @@ namespace TaviHelper
                 _cancelSource.Cancel();
             }
 
+            public void QueuePlayback(byte[] data)
+            {
+                Console.WriteLine("Queue Text");
+                _playbackQueue.Enqueue(data);
+                _newPlayback.Set();
+            }
+
             private void speakPump(CancellationToken cancelToken)
             {
                 try
                 {
                     while (!cancelToken.IsCancellationRequested)
                     {
-                        if (_speakQueue.Any())
+                        _newPlayback.WaitOne();
+                        Console.WriteLine("AutoResetEvent Triggered");
+                        while (_playbackQueue.Any())
                         {
-                            var data = _speakQueue.Dequeue();
+                            var data = _playbackQueue.Dequeue();
                             PlayData(data);
                         }
                     }
@@ -170,6 +192,7 @@ namespace TaviHelper
 
             public void PlayData(byte[] data)
             {
+                Console.WriteLine("Playing data");
                 var waveOut = new WaveOut();
                 var stream = new MemoryStream(data);
 
